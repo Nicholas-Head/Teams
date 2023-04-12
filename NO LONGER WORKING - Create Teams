@@ -1,0 +1,524 @@
+ PowerShell Modules Required
+############################################################################
+$module = Get-InstalledModule -Name ExchangeOnlineManagement
+If ($module -eq "") { Install-Module -Name AzureADPreview }
+
+$module = Get-InstalledModule -Name ExchangeOnlineManagement
+If ($module -eq "") { Install-Module -Name ExchangeOnlineManagement }
+
+$module = Get-InstalledModule -Name Microsoft.Online.SharePoint.PowerShell
+If ($module -eq "") { Install-Module -Name Microsoft.Online.SharePoint.PowerShell }
+
+$module = Get-InstalledModule -Name MicrosoftTeams
+If ($module -eq "") { Install-Module -Name MicrosoftTeams }
+ 
+$module = Get-InstalledModule -Name PnP.PowerShell
+If ($module -eq "") { Install-Module -name PnP.PowerShell }
+
+#$module = Get-InstalledModule -Name Az
+#If ($module -eq "") { install-Module -Name Az -Scope CurrentUser -Repository PSGallery -Force }
+
+Import-Module AzureADPreview
+Import-Module ExchangeOnlineManagement
+Import-Module MicrosoftTeams
+Import-Module PnP.PowerShell
+Import-Module Microsoft.Online.SharePoint.PowerShell
+#Import-Module Az -force
+############################################################################
+
+# Parameters
+############################################################################
+## Tenant URLs ##
+$TenantURL = "https://njhead.sharepoint.com"
+$SPAdminURL = "https://njhead-admin.sharepoint.com"
+
+## Template URLs ##
+$BusinessSupportTemplateSiteURL = "/sites/Template1"
+$CurriculumTemplateSiteURL = "/sites/Template2"
+
+
+## Assets Path ##
+$AssetPath = "C:\Scripts\Teams\Assets"
+############################################################################
+
+###############################################
+## Check if a string is a valid email address
+###############################################
+function IsValidEmail { 
+    param([string]$Email)
+    $Regex = '^([\w-\.]+)@((\[[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.)|(([\w-]+\.)+))([a-zA-Z]{2,4}|[0-9]{1,3})(\]?)$'
+
+   try {
+        $obj = [mailaddress]$Email
+        if($obj.Address -match $Regex){
+            return $True
+        }
+        return $False
+    }
+    catch {
+        return $False
+    } 
+}
+
+##################################
+## Construct an options question
+##################################
+function Get-SelectionFromUser {
+    param (
+        [Parameter(Mandatory=$true)]
+        [string[]]$Options,
+        [Parameter(Mandatory=$true)]
+        [string]$Prompt        
+    )
+    
+    [int]$Response = 0;
+    [bool]$ValidResponse = $false    
+
+    while (!($ValidResponse)) {            
+        [int]$OptionNo = 0
+
+        Write-Host $Prompt -ForegroundColor DarkYellow
+        Write-Host "[0]: Cancel"
+
+        foreach ($Option in $Options) {
+            $OptionNo += 1
+            Write-Host ("[$OptionNo]: {0}" -f $Option)
+        }
+
+        if ([Int]::TryParse((Read-Host), [ref]$Response)) {
+            if ($Response -eq 0) {
+                return ''
+            }
+            elseif($Response -le $OptionNo) {
+                $ValidResponse = $true
+            }
+        }
+    }
+
+    return $Options.Get($Response - 1)
+} 
+
+#####################################################
+## Create a Department Term Group in the Term Store
+#####################################################
+function CreateDeptMetadata {
+    param (
+        [Parameter(Mandatory=$true)] [string]$DisplayName,
+        [Parameter(Mandatory=$true)] [string]$ProjectOrDept
+    )
+    
+    $TermGroupDescription ="Term Group for "+$DisplayName
+    $TermSetDocTypes = "Document Types"
+    $TermSetTopics = "Topics"
+
+    Connect-PnPOnline -Url $SPAdminURL -Credential $Credential
+
+    # Add Owner Term
+    if ($ProjectOrDept -eq "Department") {
+        # Check if Department Owner Term exists
+        $OwnerTerm = Get-PnPTerm -Identity $DisplayName -TermSet "Departments" -TermGroup "Global Terms" -ErrorAction SilentlyContinue
+        If(-Not($OwnerTerm)) {
+            # Create new Department Term
+            $OwnerTerm = New-PnPTerm -TermGroup "Global Terms" -TermSet "Departments" -Name $DisplayName -Lcid 1033
+        }
+
+        # Check if Term group exists
+        $TG = Get-PnPTermGroup -Identity $DisplayName -ErrorAction SilentlyContinue
+        If(-Not($TG)) {
+            #Create new group in Termstore
+            $TG = New-PnPTermGroup -Name $DisplayName -Description $TermGroupDescription
+            Write-host -f Green "Term Group '$DisplayName' created successfully!"
+        }
+        else {
+            Write-host -f Yellow "Term Group '$DisplayName' already exists!"
+        }
+
+        $TSDocTypes = Get-PnPTermSet -Identity $TermSetDocTypes -TermGroup $DisplayName -ErrorAction SilentlyContinue
+	    If(-Not($TSDocTypes)) {
+            $TSDocTypes = New-PnPTermSet -Name $TermSetDocTypes -TermGroup $DisplayName -Lcid 1033 -IsOpenForTermCreation
+            Write-host -f Green "Term Set '$TermSetDocTypes' created successfully!"
+	    }
+	    else {
+            Write-host -f Yellow "Term Set '$TermSetDocTypes' already exists!"
+	    }
+	
+        $TSTopics = Get-PnPTermSet -Identity $TermSetTopics -TermGroup $DisplayName -ErrorAction SilentlyContinue
+        If(-Not($TSTopics)) {
+            $TSTopics = New-PnPTermSet -Name $TermSetTopics -TermGroup $DisplayName -Lcid 1033 -IsOpenForTermCreation
+            Write-host -f Green "Term Set '$TermSetTopics' created successfully!"
+    	}
+	    else {
+            Write-host -f Yellow "Term Set '$TermSetTopics' already exists!"
+    	}
+    }
+    else {
+        # Check if Project Owner Term exists
+        $OwnerTerm = Get-PnPTerm -Identity $DisplayName -TermSet "Projects" -TermGroup "Global Terms" -ErrorAction SilentlyContinue
+        If(-Not($OwnerTerm)) {
+            # Create new Department Term
+            $OwnerTerm = New-PnPTerm -TermGroup "Global Terms" -TermSet "Projects" -Name $DisplayName  -Lcid 1033
+        }
+        
+        $TSDocTypes = Get-PnPTermSet -Identity "Projects" -TermGroup "Global Terms" -ErrorAction SilentlyContinue
+    }
+
+return @($OwnerTerm,$TSDocTypes,$TSTopics)
+}
+
+###########################################################################
+## Create either a Microsoft Team (with connected SharePoint site) or 
+## an Office 365 Group connnected SharePoint Site
+###########################################################################
+function CreateTeamorSite {
+    param (
+        [Parameter(Mandatory=$true)]
+        [string]$TeamOrSite,
+        [Parameter(Mandatory=$true)]
+        [string]$DisplayName,
+        [Parameter(Mandatory=$true)]
+        [string]$Description,
+        [Parameter(Mandatory=$true)]
+        [string]$MailNickName,
+        [Parameter(Mandatory=$true)]
+        [string]$Owner,
+        [Parameter(Mandatory=$true)]
+        [string]$Classification,
+        [Parameter(Mandatory=$true)]
+        [string]$Visibility  
+    )
+    
+    Write-Host "Starting Team or Site Creation" -f Green
+
+    $VisibilityValue = $Visibility.Substring(0,$Visibility.IndexOf(" "))
+    #$ClassificationValue = $Classification.Substring(0,$Classification.IndexOf(" "))
+
+    ## Check to see if a SharePoint site exists already
+    Connect-PnPOnline -Url $SPAdminURL -Credential $Credential
+    $checkSite = $TenantURL+"/sites/"+$MailNickName
+    $Site = Get-PnPTenantSite -Url $checkSite -ErrorAction SilentlyContinue
+
+    if ($TeamOrSite -eq "Microsoft Team") {
+        # Create Microsoft Team
+        $conn = Connect-MicrosoftTeams -Credential $Credential
+        $Team = Get-Team -MailNickName $MailNickName -ErrorAction SilentlyContinue
+        If(-Not($Team) -and -not($Site)) {
+            $Team = New-Team -DisplayName $DisplayName -Description $Description -MailNickName $MailNickName -Visibility $VisibilityValue -Owner $conn.Account.Id -AllowGiphy $True -GiphyContentRating $True -AllowStickersAndMemes $True -AllowCustomMemes $True -AllowGuestCreateUpdateChannels $False -AllowGuestDeleteChannels $False -AllowCreateUpdateChannels $True -AllowDeleteChannels $False -AllowAddRemoveApps $False -AllowCreateUpdateRemoveTabs $False -AllowCreateUpdateRemoveConnectors $False -AllowUserEditMessages $True -AllowUserDeleteMessages $True -AllowOwnerDeleteMessages $True -AllowTeamMentions $True -AllowChannelMentions $True -ShowInTeamsSearchAndSuggestions $True
+            Write-Host "Team Created" -f Green
+
+            New-TeamChannel -GroupId $team.GroupId -DisplayName "Administration"
+            New-TeamChannel -GroupId $team.GroupId -DisplayName "Announcements"
+            New-TeamChannel -GroupId $team.GroupId -DisplayName "Projects"
+            Write-host "Channels Created" -f Green
+
+            Add-TeamUser -GroupId $team.groupid -user $Owner -Role Owner
+            Start-Sleep -Seconds 55  
+            Set-TeamPicture -GroupId $team.groupid -ImagePath $AssetPath"\Template3.png"
+            Write-host "Team Owner & Logo Updated" -f Green
+
+            Connect-ExchangeOnline -Credential $Credential
+            Set-UnifiedGroup -identity $MailNickName -SensitivityLabel $Classification
+            Write-host "Applied MIP Label" -f Green
+
+            $checkSite = $TenantURL+"/sites/"+$MailNickName
+            $Site = Get-PnPTenantSite -Url $checkSite
+            $OverlayTemplate = $true
+        }
+        elseif (-Not($Team) -and $Site) {
+            Write-host -f Yellow "A SharePoint Site exists without Microsoft Team"
+                        
+            ######################################################
+            # Convert existing Office 365 group to Microsoft Team?
+            ######################################################
+            $Prompt = "A SharePoint Site with the same Alias has been found. Do you want to add Microsoft Teams to this existing SharePoint site? - "+$Site.Url
+            $ConvertToTeams = Get-SelectionFromUser -Options ('Yes','No') -Prompt $Prompt
+            if ($ConvertToTeams -eq "") { exit }            
+            elseif ($ConvertToTeams -eq "Yes") {
+                New-Team -GroupId $Site.GroupId
+            }
+
+            ######################################################
+            # Overlay template on to existing Site?
+            ######################################################
+            $OverlayTemplate = Get-SelectionFromUser -Options ('Yes','No') -Prompt 'Do you want to apply the chosen template to the existing Teams connected SharePoint site?'
+            $OverlayTemplate = if ($OverlayTemplate -eq "") { exit } elseif ($OverlayTemplate -eq "Yes") { $true } else { $false }
+        }
+        else {
+            Write-host -f Yellow "A Microsoft Team & SharePoint Site with same Alias already exists"
+            
+            ######################################################
+            # Overlay template on to existing Site?
+            ######################################################
+            $OverlayTemplate = Get-SelectionFromUser -Options ('Yes','No') -Prompt 'Do you want to apply the chosen template to the existing Teams connected SharePoint site?'
+            $OverlayTemplate = if ($OverlayTemplate -eq "") { exit } elseif ($OverlayTemplate -eq "Yes") { $true } else { $false }
+        }
+    }
+    else {
+        if (-not($Site)) {
+            if ($Visibility -like "Private*") {
+                $Site = New-PnPSite -Type TeamSite -Title $DisplayName -Description $Description -Alias $MailNickName -SensitivityLabel $ClassificationValue
+
+                $OverlayTemplate = $true
+            }
+            else {
+                $Site = New-PnPSite -Type TeamSite -Title $DisplayName -Description $Description -Alias $MailNickName -SensitivityLabel $Classification -IsPublic
+         
+
+                $OverlayTemplate = $true
+            }
+        
+            Connect-PnPOnline $Site -Credential $Credential
+            $Site = Get-PnPSite      
+        }
+        else {
+            Write-host -f Yellow "A Microsoft SharePoint Site with same Alias already exists"
+            
+            ######################################################
+            # Overlay template on to existing Site?
+            ######################################################
+            $OverlayTemplate = Get-SelectionFromUser -Options ('Yes','No') -Prompt 'Do you want to apply the chosen template to the existing site?'
+            $OverlayTemplate = if ($OverlayTemplate -eq "") { exit } elseif ($OverlayTemplate -eq "Yes") { $true } else { $false }
+        }
+    }
+    
+    $SPUrl = $Site.url
+    Write-host -f Green "Completed Team or Site Creation $TeamOrSite - $DisplayName ($SPUrl)"
+
+    return $SPUrl,$OverlayTemplate
+}
+
+#####################################################
+## Apply a PnP Site Template to the SharePoint Site
+#####################################################
+function ApplyTemplate {
+    param (
+        [Parameter(Mandatory=$true)]
+        [string]$SiteType,
+        [Parameter(Mandatory=$true)]
+        [string]$TargetSiteURL,
+        [Parameter(Mandatory=$true)]
+        [string]$TargetSiteName
+    )
+    
+    Write-Host "Starting Apply Template" -f Green
+
+    switch ($SiteType) {
+        "Business Support" {
+            $TemplateSiteURL = $TenantURL+$BusinessSupportTemplateSiteURL
+            $TemplateName = $BusinessSupportTemplateSiteURL.Substring($BusinessSupportTemplateSiteURL.LastIndexOf("/")+1,$BusinessSupportTemplateSiteURL.Length-$BusinessSupportTemplateSiteURL.LastIndexOf("/")-1)
+        }
+        "Curriculum" {
+            $TemplateSiteURL = $TenantURL+$CurriculumTemplateSiteURL
+            $TemplateName = $CurriculumTemplateSiteURL.Substring($CurriculumTemplateSiteURL.LastIndexOf("/")+1,$CurriculumTemplateSiteURL.Length-$CurriculumTemplateSiteURL.LastIndexOf("/")-1)
+        }
+        "UCC" {
+            $TemplateSiteURL = $TenantURL+$UCCTemplateSiteURL
+            $TemplateName = $UCCTemplateSiteURL.Substring($UCCTemplateSiteURL.LastIndexOf("/")+1,$UCCTemplateSiteURL.Length-$UCCTemplateSiteURL.LastIndexOf("/")-1)
+        }
+    }
+
+    # Get SharePoint Site Template from Testing site
+    Connect-PnPOnline $TemplateSiteURL -Credential $Credential
+    $TemplatePath = $env:USERPROFILE+"\downloads\SiteTemplate.xml"
+    Get-PnPSiteTemplate -Out $TemplatePath -Force
+
+    #$TemplateID = Get-PnPSite
+    #$TemplateID = $TemplateID.ID
+   
+    $tempFileContents = Get-Content $TemplatePath -Raw -ErrorAction:Stop
+    Set-Content $TemplatePath -Value $tempFileContents.Replace($TemplateName,$TargetSiteName)
+    Set-Content $TemplatePath -Value $tempFileContents.Replace("&amp;lt;SiteName&amp;gt;",$TargetSiteName)
+
+    Write-Host "Invoking Template on" $TargetSiteURL -f Green
+
+    # Apply SharePoint Site Template to New Site
+    Connect-PnPOnline $TargetSiteURL -Credential $Credential
+    Invoke-PnPSiteTemplate -Path $TemplatePath -ClearNavigation
+    
+    # Remove the downloaded Site Template
+    Remove-Item $TemplatePath
+
+    Write-Host "Completed Apply Template" -f Green
+}
+
+###########################################################################
+## Join Site to a Hub Site
+###########################################################################
+function JointoHubSite {
+    param (
+        [Parameter(Mandatory=$true)]
+        [string]$TargetSiteURL,
+        [Parameter(Mandatory=$true)]
+        [string]$HubSiteURL
+    )
+    
+    Write-Host "Started Join Hubsite" -f Green
+
+    # Join new SharePoint Site to an Existing Hub
+    Connect-SPOService $SPAdminURL -Credential $Credential
+    Add-SPOHubSiteAssociation -Site $TargetSiteURL -HubSite $HubSiteURL
+    Disconnect-SPOService
+
+    Write-Host "Completed Join Hubsite" -f Green
+}
+
+
+###########################################################
+## Main - Determine the Site to create and all parameters
+###########################################################
+#Create Credentials from Azure Key Vault
+Connect-AzAccount -TenantId ""
+Set-AzContext -Subscription "sub-prd-core-lz-01"
+$Username = Get-AzKeyVaultSecret -vaultName "AutomationSA" -name "AdminUser" -AsPlainText
+$Password = Get-AzKeyVaultSecret -vaultName "AutomationSA" -name "AdminPassword" -AsPlainText
+$SecurePassword = ConvertTo-SecureString $Password -AsPlainText -Force
+$Credential = New-Object System.Management.Automation.PSCredential ($Username, $SecurePassword)
+Disconnect-AzAccount
+
+# Determine the Type of Site
+$SiteType = Get-SelectionFromUser -Options ('Template1','Template2') -Prompt 'What type of site do you need to create?'
+
+if ($SiteType -eq "") {
+    exit
+}
+
+# Determine if Microsoft Teams is required
+$TeamOrSite = Get-SelectionFromUser -Options ('Microsoft Team','SharePoint Site') -Prompt 'What would you like to create?'
+if ($TeamOrSite -eq "") { Exit }
+
+# Determine if the site should be joined to a Hub Site
+Connect-SPOService $SPAdminURL -Credential $Credential
+$HubSites = Get-SPOHubSite | Select "Title", "SiteUrl"
+Disconnect-SPOService
+
+$HubSiteOptions =@()
+foreach ($hs in $HubSites) {
+    if ($hs.Title -ne ""){
+        $HubSiteOptions += $hs.Title+" ("+$hs.SiteUrl+")"
+    }
+}
+
+$HubSite = Get-SelectionFromUser -Options $HubSiteOptions -Prompt 'Which Hub Site do you want to associate this site with?'
+
+# Classification Choice - Public / Confidential / Restricted
+Connect-IPPSSession -Credential $Credential
+$MIPOptions = @()
+
+$MIPLabels = Get-Label
+foreach($label in $MIPLabels){
+    if($label.ContentType.Contains("UnifiedGroup")){
+        $MIPOptions += $label.DisplayName
+    }
+}
+
+
+$Classification = Get-SelectionFromUser -Options $MIPOptions -Prompt 'What classification should be used?'
+if ($Classification -eq "") { exit }
+$Classification = (Get-Label -identity $Classification).guid
+
+# Group Visibility Choice - Public / Private
+$Visibility = Get-SelectionFromUser -Options ('Private (Only visible to Team members)','Public (Visible to all employees)') -Prompt 'What privacy setting should be used?'
+if ($Visibility -eq "") { exit }
+
+# New Group Details
+do {
+    $DisplayName = Read-Host -Prompt "What do you want to call the new $TeamOrSite ?"
+    $MailNickName = $DisplayName -replace '[^\p{L}\p{Nd}]', ''
+} until ($DisplayName -ne "")
+
+do {
+    $Description = Read-Host -Prompt "Enter a description for the new $TeamOrSite"
+} until ($Description -ne "")
+
+# Get a valid Owner UPN
+$ValidOwner = $False
+do {
+    $Owner = Read-Host -Prompt "Enter the Username for the Owner of '$DisplayName'"
+    if (IsValidEmail $Owner) {
+        try {
+            Connect-AzureAD -Credential $Credential
+            $TmpOwner = Get-AzureADUser -ObjectId $Owner -ErrorAction SilentlyContinue
+            if ($TmpOwner.UserPrincipalName -eq $Owner) {
+                $ValidOwner = $True
+            }            
+            else {
+                Write-host -f Yellow "Username not found in Azure Active Directory"
+            }
+            Disconnect-AzureAD   
+        }
+        catch {
+            Write-Host "$($_.Exception.Message)" -ForegroundColor Red
+        }
+    }
+    else {
+        Write-host -f Yellow "Username not in the expected format"
+    }
+} until ($ValidOwner)
+
+Write-Host ("Creating a new $Visibility $SiteType $TeamOrSite called '$DisplayName', classified as $Classification and owned by $Owner") -f Green
+
+###########################################################
+## Create the Team or Site and apply the template
+###########################################################
+try {
+    $Site = CreateTeamorSite -TeamOrSite $TeamOrSite -DisplayName $DisplayName -Description $Description -MailNickName $MailNickName -Owner $Owner -Classification $Classification -Visibility $Visibility
+
+    $SiteURL = $Site[-2]
+    $ApplyTemplate = $Site[-1]
+
+    if ($ApplyTemplate) {
+        ApplyTemplate -SiteType $SiteType -TargetSiteURL $SiteURL -TargetSiteName $MailNickName
+        
+        Write-Host "Applying Theme to site" -f Green
+        Connect-PnPOnline $SiteURL -Credential $Credential
+        Set-PnPWebTheme -Theme "Blue" -WebUrl $SiteURL
+        
+        #Ensure "Site Assets" library in the site
+        $SiteAssets = Get-PnPList -Identity "Site Assets" -ErrorAction SilentlyContinue
+        If($SiteAssets -eq $Null)
+        {
+            New-PnPList -Title "Site Assets" -Template DocumentLibrary -Url "SiteAssets" -ErrorAction SilentlyContinue | Out-Null
+        }
+
+        switch ($SiteType) {
+            "Business Support" { 
+                $LogoFileName = "Template1.png"
+                $BannerFileName = "template1.png"
+            }
+            "Curriculum" { 
+                $LogoFileName = "Template2.png"
+                $BannerFileName = "Template2.png"
+            }
+            
+            
+        }
+        
+        Write-Host "Setting Site Logo & Banner" -f Green
+        $LogoFilePath = $AssetPath+"\"+$LogoFileName
+        Add-PnPFile -Path $LogoFilePath -Folder "SiteAssets" | Out-Null
+        $BannerFilePath = $AssetPath+"\"+$BannerFileName
+        Add-PnPFile -Path $BannerFilePath -Folder "SiteAssets" | Out-Null
+        Set-PnPWebHeader -SiteLogoUrl "$($SiteURL)/SiteAssets/$($LogoFileName)" -HeaderBackgroundImageUrl "$($SiteURL)/SiteAssets/$($BannerFileName)" -HeaderLayout Extended
+        
+        Write-Host "Completed Applying Theme to site" -f Green
+    }
+
+    # Do we need to join the site to an existing hub site?
+    if ($HubSite) {
+        $r = [regex] "\(([^\(]*)\)"
+        $HubSiteURL = $r.Match($HubSite) 
+        JointoHubSite -TargetSiteURL $SiteURL -HubSiteURL $HubSiteURL.groups[1].Value
+    }
+    
+    Write-Host "**********************************************" -f Green
+    Write-Host "**          Provisioning Completed          **" -f Green
+    Write-Host "**********************************************" -f Green
+}
+catch {
+    Write-Host "$($_.Exception.Message)" -ForegroundColor Red
+}
+finally {
+    Disconnect-AzureAD
+    Disconnect-PnPOnline
+    Disconnect-MicrosoftTeams
+    Disconnect-ExchangeOnline -Confirm:$false
+}
