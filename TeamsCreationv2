@@ -1,0 +1,103 @@
+install-Module -Name Az -Scope CurrentUser -Repository PSGallery -Force
+
+# Wait for 5 minutes
+Start-Sleep -Seconds 300
+
+
+#Connect to all 365 services 
+# Connect to Exchange Online
+if (!(Get-Module ExchangeOnlineManagement -ListAvailable)) {
+    Write-Host "ExchangeOnlineManagement module not found. Installing..."
+    Install-Module ExchangeOnlineManagement -Force
+}
+Connect-ExchangeOnline
+
+# Connect to SharePoint Online
+if (!(Get-Module Microsoft.Online.SharePoint.PowerShell -ListAvailable)) {
+    Write-Host "Microsoft.Online.SharePoint.PowerShell module not found. Installing..."
+    Install-Module Microsoft.Online.SharePoint.PowerShell -Force
+}
+Connect-PnPOnline -Url $TenantURL -UseWebLogin
+Connect-SPOService -Url $SPAdminURL
+
+# Connect to Azure
+if (!(Get-Module Az -ListAvailable)) {
+    Write-Host "Az module not found. Installing..."
+    Install-Module Az -Force
+}
+Connect-AzAccount -TenantId "9155db8f-905a-4b59-a052-2710166f00a4"
+
+# Connect to Intune PowerShell
+Connect-IPPSSession
+
+# Connect to Azure Active Directory
+Connect-AzureAD
+
+# Connect to Microsoft Teams
+Connect-MicrosoftTeams
+
+
+# Set the parameters
+$TenantURL = "https://colchinst.sharepoint.com"
+$SPAdminURL = "https://colchinst-admin.sharepoint.com"
+$Template1 = "/sites/xxTemplate1"
+$Template2 = "/sites/xxTemplate2"
+
+# Ask user what they want to create Team or Sharepoint Site
+$SiteType = Read-Host "Enter 'Team' to create a Microsoft Teams team, or 'SharePoint' to create a SharePoint site"
+
+# Ask user if they want to follow the template1 or template2
+$TemplateName = Read-Host "Enter 'Template1' to use template 1, or 'Template2' to use template 2"
+
+# Ask the user what they would like to call there team or sharepoint site
+$SiteName = Read-Host "Enter the name for your $SiteType"
+
+# Check if the site name already exists in SharePoint Online or Teams
+if ((Get-SPOSite -Identity $SiteName -ErrorAction SilentlyContinue) -or (Get-Team -DisplayName $SiteName -ErrorAction SilentlyContinue)) {
+    Write-Host "This already exists. Please enter another name."
+    $SiteName = Read-Host "Enter the name for your $SiteType"
+}
+
+# Ask the user to enter a description
+$SiteDescription = Read-Host "Enter a description for your $SiteType"
+
+# Ask the user to set an owner for the team/sharepoint online site
+$OwnerEmail = Read-Host "Enter the email address of the owner for your $SiteType"
+
+# Check if the owner email exists in Azure AD
+if (!(Get-AzureADUser -ObjectID $OwnerEmail -ErrorAction SilentlyContinue)) {
+    Write-Host "User with email $OwnerEmail does not exist in Azure AD. Please enter a valid email address."
+    $OwnerEmail = Read-Host "Enter the email address of the owner for your $SiteType"
+}
+
+# If it's a Microsoft Group, ask if the user wishes to convert it to a team
+if (Get-AzureADGroup -ObjectID $OwnerEmail -ErrorAction SilentlyContinue) {
+    $ConvertToTeam = Read-Host "This is a Microsoft Group. Do you want to convert it to a team? Enter 'Yes' or 'No'"
+    if ($ConvertToTeam -eq "Yes") {
+        Connect-MicrosoftTeams
+        $Group = Get-AzureADGroup -ObjectID $OwnerEmail
+        $Team = New-Team -GroupId $Group.ObjectId -DisplayName $SiteName -Description $SiteDescription
+        Add-TeamUser -GroupId $Team.GroupId -User $OwnerEmail -Role Owner
+    }
+    else {
+        Write-Host "Exiting script..."
+        Exit
+    }
+}
+
+# If it's a SharePoint site, create the site based on the selected template
+if ($SiteType -eq "SharePoint") {
+    if ($TemplateName -eq "Template1") {
+        $SiteTemplate = $Template1
+        $SiteLogo = "c:\scripts\assets\template1.png"
+        $SiteBanner = "c:\scripts\assets\template1banner.png"
+    }
+    else {
+        $SiteTemplate = $Template2
+        $SiteLogo = "c:\scripts\assets\template2.png"
+        $SiteBanner = "c:\scripts\assets\template2banner.png"
+    }
+    }
+
+    New-SPOSite -Url $SiteName -Owner $OwnerEmail -Template $SiteTemplate -Title $SiteName -Description $SiteDescription
+    Set-SPOSite -Identity $SiteName -LogoFilePath
