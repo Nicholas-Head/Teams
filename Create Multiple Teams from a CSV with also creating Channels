@@ -1,0 +1,30 @@
+# Import the Microsoft Teams PowerShell module
+Import-Module MicrosoftTeams
+
+# Define the path to the CSV file
+$csvPath = "C:\path\to\teams.csv"
+
+# Read the CSV file into an array of objects
+$teams = Import-Csv $csvPath
+
+# Loop through each row in the CSV and create a new Team with the specified channels
+foreach ($team in $teams) {
+  # Create the new Team
+  $newTeam = New-Team -DisplayName $team.DisplayName -Description $team.Description
+
+  # Add the Announcements channel
+  $announcements = Add-TeamChannel -GroupId $newTeam.GroupId -DisplayName "Announcements"
+
+  # Add the SCRUM channel
+  $scrum = Add-TeamChannel -GroupId $newTeam.GroupId -DisplayName "SCRUM"
+
+  # Add Channel 1
+  $channel1 = Add-TeamChannel -GroupId $newTeam.GroupId -DisplayName "Channel 1"
+
+  # Add Channel 2
+  $channel2 = Add-TeamChannel -GroupId $newTeam.GroupId -DisplayName "Channel 2"
+
+  # Display the details of the new Team
+  Write-Host "Created Team $($newTeam.DisplayName) with ID $($newTeam.GroupId)"
+  Write-Host "Added channels: $($announcements.DisplayName), $($scrum.DisplayName), $($channel1.DisplayName), $($channel2.DisplayName)"
+}
