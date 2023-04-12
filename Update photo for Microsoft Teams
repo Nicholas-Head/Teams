@@ -1,0 +1,17 @@
+# Import the MicrosoftTeams module
+Import-Module MicrosoftTeams
+
+# Set the path to the image file
+$imagePath = "C:\path\to\image.jpg"
+
+# Set the team ID for the team you want to update
+$teamId = "<Team ID>"
+
+# Read the image file and convert it to a byte array
+$imageBytes = [System.IO.File]::ReadAllBytes($imagePath)
+
+# Convert the byte array to a base64 string
+$imageBase64 = [System.Convert]::ToBase64String($imageBytes)
+
+# Update the team's profile picture
+Set-TeamPicture -GroupId $teamId -Content $imageBase64 -ContentType "image/jpeg"
